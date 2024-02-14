@@ -78,25 +78,19 @@ module Deliver
 
     require_relative 'loader'
 
-    attr_accessor :options
-
-    def initialize(options)
-      self.options = options
-    end
-
     # Make sure to call `load_from_filesystem` before calling upload
-    def upload
+    def upload(options)
       return if options[:skip_metadata]
 
       app = Deliver.cache[:app]
 
       platform = Spaceship::ConnectAPI::Platform.map(options[:platform])
 
-      enabled_languages = detect_languages
+      enabled_languages = detect_languages(options)
 
-      app_store_version_localizations = verify_available_version_languages!(app, enabled_languages) unless options[:edit_live]
+      app_store_version_localizations = verify_available_version_languages!(options, app, enabled_languages) unless options[:edit_live]
       app_info = fetch_edit_app_info(app)
-      app_info_localizations = verify_available_info_languages!(app, app_info, enabled_languages) unless options[:edit_live] || !updating_localized_app_info?(app, app_info)
+      app_info_localizations = verify_available_info_languages!(options, app, app_info, enabled_languages) unless options[:edit_live] || !updating_localized_app_info?(options, app, app_info)
 
       if options[:edit_live]
         # not all values are editable when using live_version
@@ -348,9 +342,9 @@ module Deliver
         end
       end
 
-      review_information(version)
-      review_attachment_file(version)
-      app_rating(app_info)
+      set_review_information(version, options)
+      set_review_attachment_file(version, options)
+      set_app_rating(app_info, options)
     end
 
     # rubocop:enable Metrics/PerceivedComplexity
@@ -366,12 +360,12 @@ module Deliver
     end
 
     # If the user is using the 'default' language, then assign values where they are needed
-    def assign_defaults
+    def assign_defaults(options)
       # Normalizes languages keys from symbols to strings
-      normalize_language_keys
+      normalize_language_keys(options)
 
       # Build a complete list of the required languages
-      enabled_languages = detect_languages
+      enabled_languages = detect_languages(options)
 
       # Get all languages used in existing settings
       (LOCALISED_VERSION_VALUES.keys + LOCALISED_APP_VALUES.keys).each do |key|
@@ -408,7 +402,7 @@ module Deliver
       end
     end
 
-    def detect_languages
+    def detect_languages(options)
       # Build a complete list of the required languages
       enabled_languages = options[:languages] || []
 
@@ -433,49 +427,40 @@ module Deliver
         .uniq
     end
 
-    def fetch_edit_app_store_version(app, platform)
-      retry_if_nil("Cannot find edit app store version") do
+    def fetch_edit_app_store_version(app, platform, wait_time: 10)
+      retry_if_nil("Cannot find edit app store version", wait_time: wait_time) do
         app.get_edit_app_store_version(platform: platform)
       end
     end
 
-    def fetch_edit_app_info(app)
-      retry_if_nil("Cannot find edit app info") do
+    def fetch_edit_app_info(app, wait_time: 10)
+      retry_if_nil("Cannot find edit app info", wait_time: wait_time) do
         app.fetch_edit_app_info
       end
     end
 
-    def fetch_live_app_info(app)
-      retry_if_nil("Cannot find live app info") do
+    def fetch_live_app_info(app, wait_time: 10)
+      retry_if_nil("Cannot find live app info", wait_time: wait_time) do
         app.fetch_live_app_info
       end
     end
 
-    # Retries a block of code if the return value is nil, with an exponential backoff.
-    def retry_if_nil(message)
-      tries = options[:version_check_wait_retry_limit]
-      wait_time = 10
+    def retry_if_nil(message, tries: 5, wait_time: 10)
       loop do
         tries -= 1
 
         value = yield
         return value if value
 
-        # Calculate sleep time to be the lesser of the exponential backoff or 5 minutes.
-        # This prevents problems with CI's console output timeouts (of usually 10 minutes), and also
-        # speeds up the retry time for the user, as waiting longer than 5 minutes is a too long wait for a retry.
-        sleep_time = [wait_time * 2, 5 * 60].min
-        UI.message("#{message}... Retrying after #{sleep_time} seconds (remaining: #{tries})")
-        Kernel.sleep(sleep_time)
+        UI.message("#{message}... Retrying after #{wait_time} seconds (remaining: #{tries})")
+        sleep(wait_time)
 
         return nil if tries.zero?
-
-        wait_time *= 2 # Double the wait time for the next iteration
       end
     end
 
     # Checking if the metadata to update includes localised App Info
-    def updating_localized_app_info?(app, app_info)
+    def updating_localized_app_info?(options, app, app_info)
       app_info ||= fetch_live_app_info(app)
       unless app_info
         UI.important("Can't find edit or live App info. Skipping upload.")
@@ -514,7 +499,7 @@ module Deliver
     end
 
     # Finding languages to enable
-    def verify_available_info_languages!(app, app_info, languages)
+    def verify_available_info_languages!(options, app, app_info, languages)
       unless app_info
         UI.user_error!("Cannot update languages - could not find an editable 'App Info'. Verify that your app is in one of the editable states in App Store Connect")
         return
@@ -546,7 +531,7 @@ module Deliver
     end
 
     # Finding languages to enable
-    def verify_available_version_languages!(app, languages)
+    def verify_available_version_languages!(options, app, languages)
       platform = Spaceship::ConnectAPI::Platform.map(options[:platform])
       version = fetch_edit_app_store_version(app, platform)
 
@@ -581,7 +566,7 @@ module Deliver
     end
 
     # Loads the metadata files and stores them into the options object
-    def load_from_filesystem
+    def load_from_filesystem(options)
       return if options[:skip_metadata]
 
       # Load localised data
@@ -638,7 +623,7 @@ module Deliver
     private
 
     # Normalizes languages keys from symbols to strings
-    def normalize_language_keys
+    def normalize_language_keys(options)
       (LOCALISED_VERSION_VALUES.keys + LOCALISED_APP_VALUES.keys).each do |key|
         current = options[key]
         next unless current && current.kind_of?(Hash)
@@ -651,7 +636,7 @@ module Deliver
       options
     end
 
-    def review_information(version)
+    def set_review_information(version, options)
       info = options[:app_review_information]
       return if info.nil? || info.empty?
 
@@ -684,7 +669,7 @@ module Deliver
       end
     end
 
-    def review_attachment_file(version)
+    def set_review_attachment_file(version, options)
       app_store_review_detail = version.fetch_app_store_review_detail
       app_store_review_attachments = app_store_review_detail.app_store_review_attachments || []
 
@@ -702,7 +687,7 @@ module Deliver
       end
     end
 
-    def app_rating(app_info)
+    def set_app_rating(app_info, options)
       return unless options[:app_rating_config_path]
 
       require 'json'
